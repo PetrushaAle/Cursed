@@ -1,0 +1,484 @@
+#include <iostream>
+#include <sqlite3.h>
+#include <string>
+#include <stdexcept>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
+
+using namespace std;
+
+void clearConsole() {
+#ifdef _WIN32
+    system("cls");
+#else
+    system("clear");
+#endif
+}
+
+void pauseConsole() {
+    cout << "Press Enter to continue...";
+    cin.ignore();
+    cin.get();
+}
+
+class Database {
+private:
+    sqlite3* db;
+
+public:
+    Database(const string& dbName) {
+        if (sqlite3_open(dbName.c_str(), &db) != SQLITE_OK) {
+            throw runtime_error("Could not open database.");
+        }
+        initializeTables();
+    }
+
+    ~Database() {
+        sqlite3_close(db);
+    }
+
+    void initializeTables() {
+        const string userTable = "CREATE TABLE IF NOT EXISTS users ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "username TEXT UNIQUE);";
+
+        const string teaTable = "CREATE TABLE IF NOT EXISTS teas ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "name TEXT UNIQUE, "
+            "country TEXT, "
+            "price REAL, "
+            "quantity INTEGER);";
+
+        const string orderTable = "CREATE TABLE IF NOT EXISTS orders ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "user_id INTEGER, "
+            "tea_id INTEGER, "
+            "quantity INTEGER, "
+            "total_price REAL, "
+            "FOREIGN KEY(user_id) REFERENCES users(id), "
+            "FOREIGN KEY(tea_id) REFERENCES teas(id));";
+
+        executeQuery(userTable);
+        executeQuery(teaTable);
+        executeQuery(orderTable);
+    }
+
+    void executeQuery(const string& query) {
+        char* errMsg = nullptr;
+        if (sqlite3_exec(db, query.c_str(), nullptr, nullptr, &errMsg) != SQLITE_OK) {
+            string error = "SQL error: " + string(errMsg);
+            sqlite3_free(errMsg);
+            throw runtime_error(error);
+        }
+    }
+
+    sqlite3* getDatabase() const {
+        return db;
+    }
+};
+
+class TeaMailSystem {
+protected:
+    Database& database;
+    int getUserId(const string& username) const {
+        string query = "SELECT id FROM users WHERE username = '" + username + "';";
+        sqlite3_stmt* stmt;
+        int userId = -1;
+
+        if (sqlite3_prepare_v2(database.getDatabase(), query.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+            if (sqlite3_step(stmt) == SQLITE_ROW) {
+                userId = sqlite3_column_int(stmt, 0);
+            }
+        }
+        sqlite3_finalize(stmt);
+        return userId;
+    }
+
+    int getTeaId(const string& teaName) const {
+        string query = "SELECT id FROM teas WHERE name = '" + teaName + "';";
+        sqlite3_stmt* stmt;
+        int teaId = -1;
+
+        if (sqlite3_prepare_v2(database.getDatabase(), query.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+            if (sqlite3_step(stmt) == SQLITE_ROW) {
+                teaId = sqlite3_column_int(stmt, 0);
+            }
+        }
+        sqlite3_finalize(stmt);
+        return teaId;
+    }
+
+public:
+    explicit TeaMailSystem(Database& db) : database(db) {}
+
+    void registerUser(const string& username) {
+        string query = "INSERT INTO users (username) VALUES (?);";
+        sqlite3_stmt* stmt;
+
+        if (sqlite3_prepare_v2(database.getDatabase(), query.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+            throw runtime_error("Failed to prepare statement.");
+        }
+
+        sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_STATIC);
+        if (sqlite3_step(stmt) != SQLITE_DONE) {
+            cout << "Error: User might already exist.\n";
+        }
+        else {
+            cout << "User " << username << " registered.\n";
+        }
+
+        sqlite3_finalize(stmt);
+    }
+};
+
+class Tea : public TeaMailSystem {
+public:
+    using TeaMailSystem::TeaMailSystem;
+
+    void addTea(const string& name, const string& country, double price, int quantity) {
+        sqlite3_stmt* stmt;
+        string query = "INSERT INTO teas (name, country, price, quantity) VALUES (?, ?, ?, ?);";
+
+        if (sqlite3_prepare_v2(database.getDatabase(), query.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+            throw runtime_error("Failed to prepare statement.");
+        }
+        sqlite3_bind_text(stmt, 1, name.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 2, country.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_double(stmt, 3, price);
+        sqlite3_bind_int(stmt, 4, quantity);
+
+        if (sqlite3_step(stmt) != SQLITE_DONE) {
+            cout << "Error: Tea might already exist.\n";
+        }
+        else {
+            cout << "Tea " << name << " from " << country << " added.\n";
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    void displayTeas() const {
+        const string query = "SELECT name, country, price, quantity FROM teas;";
+        sqlite3_stmt* stmt;
+
+        if (sqlite3_prepare_v2(database.getDatabase(), query.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+            cout << "Available teas:\n";
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                string name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+                string country = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+                double price = sqlite3_column_double(stmt, 2);
+                int quantity = sqlite3_column_int(stmt, 3);
+                cout << name << " (" << country << ") - $" << price << " - Available: " << quantity << "\n";
+            }
+        }
+        sqlite3_finalize(stmt);
+    }
+    void restockTea(const string& teaName, int quantity) {
+        int teaId = getTeaId(teaName);
+
+        if (teaId == -1) {
+            cout << "Tea not found.\n";
+            return;
+        }
+
+        string updateQuery = "UPDATE teas SET quantity = quantity + " + to_string(quantity) + " WHERE id = " + to_string(teaId) + ";";
+        database.executeQuery(updateQuery);
+
+        cout << "Stock of " << teaName << " increased by " << quantity << ".\n";
+    }
+
+};
+
+class Orders : public TeaMailSystem {
+public:
+    using TeaMailSystem::TeaMailSystem;
+
+    void placeOrder(const string& username, const string& teaName, int quantity) {
+        sqlite3_stmt* stmt;
+
+        // Find user ID
+        string userQuery = "SELECT id FROM users WHERE username = ?;";
+        if (sqlite3_prepare_v2(database.getDatabase(), userQuery.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+            throw runtime_error("Failed to prepare user query.");
+        }
+        sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_STATIC);
+        if (sqlite3_step(stmt) != SQLITE_ROW) {
+            cout << "User not found.\n";
+            sqlite3_finalize(stmt);
+            return;
+        }
+        int userId = sqlite3_column_int(stmt, 0);
+        sqlite3_finalize(stmt);
+
+        // Find tea ID and price
+        string teaQuery = "SELECT id, price, quantity FROM teas WHERE name = ?;";
+        if (sqlite3_prepare_v2(database.getDatabase(), teaQuery.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+            throw runtime_error("Failed to prepare tea query.");
+        }
+        sqlite3_bind_text(stmt, 1, teaName.c_str(), -1, SQLITE_STATIC);
+        if (sqlite3_step(stmt) != SQLITE_ROW) {
+            cout << "Tea not found.\n";
+            sqlite3_finalize(stmt);
+            return;
+        }
+        int teaId = sqlite3_column_int(stmt, 0);
+        double price = sqlite3_column_double(stmt, 1);
+        int stockQuantity = sqlite3_column_int(stmt, 2);
+        sqlite3_finalize(stmt);
+
+        if (stockQuantity < quantity) {
+            cout << "Not enough stock available.\n";
+            return;
+        }
+
+        // Insert order
+        double totalPrice = price * quantity;
+        string orderQuery = "INSERT INTO orders (user_id, tea_id, quantity, total_price) VALUES (?, ?, ?, ?);";
+        if (sqlite3_prepare_v2(database.getDatabase(), orderQuery.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+            throw runtime_error("Failed to prepare order query.");
+        }
+        sqlite3_bind_int(stmt, 1, userId);
+        sqlite3_bind_int(stmt, 2, teaId);
+        sqlite3_bind_int(stmt, 3, quantity);
+        sqlite3_bind_double(stmt, 4, totalPrice);
+
+        if (sqlite3_step(stmt) != SQLITE_DONE) {
+            cout << "Failed to place order.\n";
+        }
+        else {
+            cout << "Order placed successfully.\n";
+        }
+        sqlite3_finalize(stmt);
+
+        // Update tea stock
+        string updateQuery = "UPDATE teas SET quantity = quantity - ? WHERE id = ?;";
+        if (sqlite3_prepare_v2(database.getDatabase(), updateQuery.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+            throw runtime_error("Failed to prepare update query.");
+        }
+        sqlite3_bind_int(stmt, 1, quantity);
+        sqlite3_bind_int(stmt, 2, teaId);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
+
+    void displayOrders(const string& username) const {
+        int userId = getUserId(username);
+        if (userId == -1) {
+            cout << "User not found.\n";
+            return;
+        }
+
+        string query = "SELECT teas.name, teas.country, orders.quantity, orders.total_price FROM orders "
+            "JOIN teas ON orders.tea_id = teas.id WHERE orders.user_id = " + to_string(userId) + ";";
+        sqlite3_stmt* stmt;
+
+        if (sqlite3_prepare_v2(database.getDatabase(), query.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+            cout << "Orders for " << username << ":\n";
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                string teaName = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+                string country = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+                int quantity = sqlite3_column_int(stmt, 2);
+                double totalPrice = sqlite3_column_double(stmt, 3);
+                cout << "Order: " << quantity << "x " << teaName << " from " << country << " - Total: $" << totalPrice << "\n";
+            }
+        }
+        sqlite3_finalize(stmt);
+    }
+    void displayAllOrders() const {
+        const string query = "SELECT users.username, teas.name, teas.country, orders.quantity, orders.total_price "
+            "FROM orders "
+            "JOIN users ON orders.user_id = users.id "
+            "JOIN teas ON orders.tea_id = teas.id;";
+        sqlite3_stmt* stmt;
+
+        if (sqlite3_prepare_v2(database.getDatabase(), query.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+            cout << "All Orders:\n";
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                string username = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+                string teaName = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+                string country = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+                int quantity = sqlite3_column_int(stmt, 3);
+                double totalPrice = sqlite3_column_double(stmt, 4);
+                cout << username << " ordered " << quantity << "x " << teaName << " from " << country << " - Total: $" << totalPrice << "\n";
+            }
+        }
+        sqlite3_finalize(stmt);
+    }
+};
+
+void userMode(Database& db) {
+    Tea userTea(db);
+    Orders userOrders(db);
+
+    cout << "Enter your username: ";
+    string username;
+    cin >> username;
+
+    userTea.registerUser(username);
+
+    int choice;
+    while (true) {
+        clearConsole();
+        cout << "User Menu:\n";
+        cout << "1. View Teas\n2. Place Order\n3. View Your Orders\n4. Exit\n";
+        cout << "Enter choice: ";
+        cin >> choice;
+
+        switch (choice) {
+        case 1:
+            userTea.displayTeas();
+            break;
+        case 2: {
+            string teaName;
+            int quantity;
+            cout << "Enter tea name: ";
+            cin >> teaName;
+            cout << "Enter quantity: ";
+            cin >> quantity;
+            userOrders.placeOrder(username, teaName, quantity);
+            break;
+        }
+        case 3:
+            userOrders.displayOrders(username);
+            break;
+        case 4:
+            cout << "Exiting user mode...\n";
+            return;
+        default:
+            cout << "Invalid choice. Try again.\n";
+            system("cls");
+        }
+        pauseConsole();
+    }
+}
+
+void adminMode(Database& db) {
+    const string adminPassword = "11:11";
+    string inputPassword;
+
+    cout << "Enter admin password: ";
+    cin >> inputPassword;
+
+    if (inputPassword != adminPassword) {
+        cout << "Incorrect password. Access denied.\n";
+        return;
+    }
+
+    Tea adminTea(db);
+    Orders adminOrders(db);
+    TeaMailSystem adminSystem(db);
+
+    int choice;
+    while (true) {
+        clearConsole();
+        cout << "Admin Menu:\n";
+        cout << "1. Register User\n2. Add Tea\n3. Display Teas\n4. Place Order\n5. View Orders\n6. Restock tea\n7. Exit\n";
+        cout << "Enter choice: ";
+        cin >> choice;
+
+        switch (choice) {
+        case 1: {
+            string username;
+            cout << "Enter username: ";
+            cin >> username;
+            adminSystem.registerUser(username);
+            break;
+        }
+        case 2: {
+            string name, country;
+            double price;
+            int quantity;
+            cout << "Enter tea name: ";
+            cin >> name;
+            cout << "Enter country: ";
+            cin >> country;
+            cout << "Enter price: ";
+            cin >> price;
+            cout << "Enter quantity: ";
+            cin >> quantity;
+            adminTea.addTea(name, country, price, quantity);
+            break;
+        }
+        case 3:
+            adminTea.displayTeas();
+            break;
+        case 4: {
+            string username, teaName;
+            int quantity;
+            cout << "Enter username: ";
+            cin >> username;
+            cout << "Enter tea name: ";
+            cin >> teaName;
+            cout << "Enter quantity: ";
+            cin >> quantity;
+            adminOrders.placeOrder(username, teaName, quantity);
+            break;
+        }
+        case 5: {
+            string username;
+            cout << "1. View Orders for a User\n2. View All Orders\n";
+            int orderChoice;
+            cout << "Enter choice: ";
+            cin >> orderChoice;
+
+            if (orderChoice == 1) {
+                cout << "Enter username: ";
+                cin >> username;
+                adminOrders.displayOrders(username);
+            }
+            else if (orderChoice == 2) {
+                adminOrders.displayAllOrders();
+            }
+            else {
+                cout << "Invalid choice.\n";
+                system("cls");
+            }
+            break;
+        }
+        case 6: {
+            string teaNameR;
+            int quantity;
+            cout << "Enter tea name: ";
+            cin >> teaNameR;
+            cout << "Enter additional quantity: ";
+            cin >> quantity;
+            adminTea.restockTea(teaNameR, quantity);
+            break;
+        }
+        case 7:
+            cout << "Exiting admin mode...\n";
+            return;
+        default:
+            cout << "Invalid choice. Try again.\n";
+            system("cls");
+        }
+        pauseConsole();
+    }
+}
+
+int main() {
+    try {
+        Database db("tea_mail_system.db");
+
+        cout << "Select mode:\n1. Admin\n2. User\n";
+        int mode;
+        cin >> mode;
+
+        if (mode == 1) {
+            adminMode(db);
+        }
+        else if (mode == 2) {
+            userMode(db);
+        }
+        else {
+            cout << "Invalid choice.\n";
+        }
+    }
+    catch (const exception& e) {
+        cerr << e.what() << endl;
+    }
+    return 0;
+}
